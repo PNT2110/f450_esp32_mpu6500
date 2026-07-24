@@ -1,6 +1,6 @@
 # ESP32 F450 MPU6500 Quadcopter
 
-Firmware điều khiển quadcopter F450/F330 dùng ESP32, MPU6500, SBUS, GPS u-blox, la bàn QMC5883 và cảm biến TOF/optical-flow MTF-01P. Dự án có web UI để theo dõi telemetry, trạng thái cảm biến, PID và hiệu chỉnh một số tham số khi chạy.
+Firmware điều khiển quadcopter F450 dùng ESP32, MPU6500, SBUS, GPS u-blox, la bàn QMC5883 và cảm biến TOF/optical-flow MTF-01P. Dự án có web UI để theo dõi telemetry, trạng thái cảm biến, PID và hiệu chỉnh một số tham số khi chạy.
 
 ## Tính năng chính
 
