@@ -1,0 +1,574 @@
+================================================================================
+  ESP32 DRONE F330 — CẤU HÌNH PHẦN CỨNG & THÔNG SỐ HOẠT ĐỘNG
+  Bản viết lại theo firmware: f330_esp32_mpu6500_driver_v25.ino
+  Đã đối chiếu thêm 17 ảnh linh kiện trong gói "Linh kiện"
+  CONFIG_VERSION: 40
+  Cập nhật: 2026-07-04
+================================================================================
+
+  MỤC ĐÍCH
+  - File này là bản cấu hình phần cứng đúng theo code hiện tại.
+  - Ưu tiên thông số trong firmware, driver MPU6500, web_ui và thư viện PWM/Servo.
+  - Thông số linh kiện thương mại được bóc từ ảnh sản phẩm và ghi rõ trạng thái
+    đang dùng / chưa dùng trong firmware.
+  - Những chỗ khác với file cũ đã được sửa rõ ở cuối file.
+
+================================================================================
+  1) KHUNG / FRAME
+================================================================================
+  Model             : DJI Flamewheel F330 / F330 clone
+  Cấu hình          : X-frame, nhìn từ trên xuống
+  Wheelbase         : 330 mm
+  Trọng lượng khung : khoảng 143 g theo ảnh sản phẩm
+  Tải cất cánh      : khoảng 600–1200 g theo ảnh sản phẩm
+  Prop khuyến nghị  : 8045 CW + 8045 CCW
+  Prop ảnh sản phẩm : 8 x 4.5 inch, không bao gồm trong bộ khung
+  Motor gợi ý frame : 2212, stator khoảng 22 x 12 mm
+  ESC gợi ý frame   : 18A OPTO theo ảnh sản phẩm; dự án hiện dùng ESC 30A
+  Nguồn dùng hiện tại: 3S LiPo
+
+  Ghi chú:
+  - Frame có thể chịu 3S–4S tùy motor/ESC, nhưng mạch đo pin trong code hiện tại
+    đang tính theo 3S và module chia áp 5:1. Với 4S đầy 16.8V, đầu ra chia áp
+    xấp xỉ 3.36V, sát/vượt ngưỡng ADC ESP32. Không dùng 4S nếu chưa đổi chia áp
+    hoặc hiệu chuẩn lại phần đo pin.
+
+================================================================================
+  2) FLIGHT CONTROLLER / MCU
+================================================================================
+  Board             : ESP32-DevKitC-32 / ESP32-WROOM-32
+  Board trong ảnh   : ESP32 DevKitC-32 30 chân, USB Type-C, USB-UART CH340C
+  Module trong ảnh  : ESP32-WROOM-32
+  MCU trong ảnh     : ESP32-D0WDQ6-V3, dual-core 32-bit
+  CPU               : ESP32 dual-core 240 MHz
+  RAM               : 520 KB SRAM
+  ROM/RTC SRAM ảnh  : 448 KB ROM, 16 KB SRAM RTC
+  Flash ngoài ảnh   : 4 MB
+  Nguồn vào board   : USB 5V hoặc VIN 5V DC, tối đa khoảng 5.5V theo ảnh shop
+  Kích thước board  : khoảng 52 x 28 mm
+  Khối lượng board  : khoảng 9.5 g
+  Flash/NVS         : Preferences namespace "drone_v30"
+  NVS config ver    : 40
+  Core chạy flight  : Core 1, taskFlight, chu kỳ mục tiêu 4 ms / 250 Hz
+  Core chạy web     : Core 0, taskComm, WebServer
+  Brownout detector : Tắt trong setup() bằng WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG,0)
+
+  Quan trọng:
+  - GPIO35 là input-only, dùng đúng cho đo điện áp.
+  - GPIO25/26/27/33 nằm trong nhóm GPIO PWM hợp lệ của ESP32 thường.
+  - WiFi được khởi tạo trước ESC trong setup(), giữ nguyên thứ tự này.
+
+================================================================================
+  3) SƠ ĐỒ GPIO TỔNG QUÁT
+================================================================================
+  GPIO21  -> I2C SDA: MPU6500 + QMC5883 compass
+  GPIO22  -> I2C SCL: MPU6500 + QMC5883 compass
+  GPIO14  -> SBUS RX từ receiver MC7RE / Microzone, Serial1 RX, inverted
+  GPIO16  -> ALT SENSOR / MTF-01P TX vào ESP32 RX, khai báo sẵn
+  GPIO17  -> ALT SENSOR / MTF-01P RX từ ESP32 TX, khai báo sẵn
+  GPIO32  -> GPS RX nhận từ ESP32 TX
+  GPIO34  -> GPS TX vào ESP32 RX, input-only dùng RX OK
+  GPIO35  -> ADC đo điện áp pin qua module chia áp 5:1
+  GPIO27  -> ESC M1: Top Left  / trước-trái
+  GPIO26  -> ESC M2: Bottom Left / sau-trái
+  GPIO25  -> ESC M3: Bottom Right / sau-phải
+  GPIO33  -> ESC M4: Top Right / trước-phải
+  GND     -> GND chung giữa ESP32, ESC, receiver, MPU6500, QMC5883, GPS/MTF, cảm biến áp
+
+  Module tích hợp telemetry/debug:
+  - GPS: UART2 38400 8N1, GPS TX -> GPIO34, GPS RX -> GPIO32, GPS_UART_ENABLED=1.
+  - MTF-01P: UART0 remap 115200 8N1, MTF TX -> GPIO16, MTF RX -> GPIO17.
+  - QMC5883 compass: I2C 0x0D trên GPIO21/GPIO22, chỉ hiển thị/log heading.
+
+  Lưu ý MTF:
+  - MTF TX -> ESP32 GPIO16.
+  - MTF RX -> ESP32 GPIO17, nối theo code test MTF độc lập.
+  - Firmware dùng UART0 remap cho MTF để GPS và MTF chạy đồng thời.
+  - Khi MTF dùng UART0, USB Serial Monitor/blackbox runtime bị tắt để tránh gửi rác vào MTF.
+  - KHÔNG dùng GPIO33 làm MTF TX trong firmware drone vì GPIO33 là ESC M4.
+
+  Bảng dây ESC:
+  +---------+---------+----------------+----------------+----------+
+  | Motor   | GPIO    | Vị trí X-frame | Hướng quay code| Prop     |
+  +---------+---------+----------------+----------------+----------+
+  | M1      | GPIO27  | TL / trước-trái| CCW            | CCW prop |
+  | M2      | GPIO26  | BL / sau-trái  | CW             | CW prop  |
+  | M3      | GPIO25  | BR / sau-phải  | CCW            | CCW prop |
+  | M4      | GPIO33  | TR / trước-phải| CW             | CW prop  |
+  +---------+---------+----------------+----------------+----------+
+
+  Hướng quay trên là NHÌN TỪ TRÊN XUỐNG và khớp với MIX_YAW trong code:
+  - M1, M3 là CCW -> MIX_YAW = +1
+  - M2, M4 là CW  -> MIX_YAW = -1
+
+  Nếu máy lật khi tăng ga:
+  1. Tháo cánh trước khi test.
+  2. Kiểm tra lại đúng thứ tự M1/M2/M3/M4 theo bảng trên.
+  3. Kiểm tra prop CW/CCW đúng chiều tạo lực nâng.
+  4. Kiểm tra IMU orientation ở mục 8 trước khi đổi PID.
+
+================================================================================
+  4) ĐỘNG CƠ / MOTOR
+================================================================================
+  Model             : A2212 1000KV BLDC
+  Dòng motor ảnh    : A2212 brushless, có nhiều bản 930/1000/1400/2200/2450/2700/3500KV
+  Bản dùng dự án    : 1000KV
+  Trọng lượng ảnh   : khoảng 47 g/motor
+  Kích thước ảnh    : motor khoảng 27.5 x 30 mm, trục 3.17 mm
+  Pin hỗ trợ ảnh    : 2S–3S LiPo
+  Cánh đang tối ưu  : 8045
+  Điện áp chạy      : 3S LiPo
+  Dòng tham khảo    : 5–15A/motor, đỉnh ngắn hạn khoảng 20A/motor
+  Tổng thrust tham khảo với 8045 + 3S: phụ thuộc motor/prop thực tế, thường dư lực
+  cho F330 khoảng 0.8–1.2 kg nếu pin và ESC đủ dòng.
+
+================================================================================
+  5) ESC / PWM OUTPUT
+================================================================================
+  ESC               : Generic BLDC ESC 30A, PWM chuẩn
+  ESC trong ảnh     : ESC 30A/40A cho motor không chổi than, có sẵn jack chuối
+  Tương thích ảnh   : pin 3S/4S, motor 2212 800–1200KV và tương đương
+  Chọn theo ảnh     : 30A phù hợp motor 930KV/1000KV/1400KV
+  Protocol          : PWM servo/ESC thường, KHÔNG phải DSHOT/OneShot
+  Tần số PWM         : 400 Hz
+  Dải lệnh attach   : 1000–2000 us
+  ESC_MIN_US        : 1000 us
+  ESC_MAX_US        : 2000 us
+  MUC_GA_NGHI       : 1150 us  (idle sau khi ARM)
+  GA_KHOI_DONG_MAX  : 1150 us  (chỉ ARM khi throttle <= ngưỡng này)
+  GA_HOAT_DONG_MIN  : 1200 us  (dưới mức này: motor idle, reset PID)
+
+  Thứ tự khởi tạo ESC trong setup():
+  1. ESP32PWM::allocateTimer(0..3)
+  2. dongCo[i].setPeriodHertz(400)
+  3. dongCo[i].attach(PIN_ESC[i], 1000, 2000)
+  4. dongCo[i].writeMicroseconds(1000)
+  5. delay(2000) để ESC nhận min throttle
+
+  Lưu ý cấp nguồn ESC/BEC:
+  - Phải nối GND chung.
+  - Nếu ESC có BEC 5V, chỉ nên để MỘT dây đỏ BEC cấp 5V cho ESP32/receiver,
+    các dây đỏ BEC còn lại nên rút/ cách điện để tránh các BEC đấu song song.
+  - Nếu ESC là OPTO không có BEC, cần module buck 5V riêng đủ dòng.
+
+================================================================================
+  6) MIXER MOTOR X-FRAME THEO CODE
+================================================================================
+  ROLL_MIX_DIR      : +1.0
+  PITCH_MIX_DIR     : +1.0
+  YAW_MIX_DIR       : +1.0
+
+  MIX_ROLL[4]       : {-1, -1, +1, +1}
+  MIX_PITCH[4]      : {+1, -1, -1, +1}
+  MIX_YAW[4]        : {+1, -1, +1, -1}
+
+  Nghĩa là theo thứ tự M1, M2, M3, M4:
+  - Roll correction âm trên bên trái, dương trên bên phải.
+  - Pitch correction dương ở phía trước, âm ở phía sau.
+  - Yaw correction dương trên motor CCW, âm trên motor CW.
+
+  Giới hạn trộn:
+  PID_OUT_LIMIT     : ±380
+  MOTOR_CORR_LIMIT  : ±320
+  PID_INT_LIMIT     : ±80
+  MAX_RATE_DPS      : ±180 deg/s
+  GIOI_HAN_GOC      : ±20 deg từ stick Roll/Pitch
+  GOC_AN_TOAN       : 45 deg, vượt ngưỡng sẽ cutoff motor và DISARM
+
+================================================================================
+  7) PIN / BATTERY & VOLTAGE SENSOR
+================================================================================
+  Pin hiện tại      : 3S LiPo 2200 mAh 45C XT60
+  Pin trong ảnh     : Shangyi 3S 2200mAh 45C, phích cắm T/XT60
+  Điện áp đầy       : 12.6 V
+  Điện áp danh định : 11.1 V
+  Dòng xả lý thuyết : 2.2Ah x 45C ≈ 99A, chỉ xem là tham khảo vì C-rating shop
+                       thường lạc quan; kiểm tra sụt áp/nhiệt thực tế khi bay.
+  Cảnh báo hiển thị : 10.5 V tương ứng 0% trên web
+  Dải % pin code    : 10.5 V -> 0%, 12.6 V -> 100%
+  Pin yếu tự hạ cánh: PIN_YEU_V = 10.8 V
+  Pin cạn chặn ARM  : PIN_CAN_V = 10.5 V
+  Tốc độ hạ ga auto : HA_CANH_GIAM_US_S = 30 us/giây
+  DISARM sau idle   : HA_CANH_IDLE_MS = 3000 ms
+
+  Hành vi failsafe pin:
+  - Khi đang ARM và điện áp <= 10.8 V, firmware bật tuDongHaCanh.
+  - Auto landing hạ trần ga từ từ, vẫn giữ PID cân bằng Roll/Pitch/Yaw.
+  - Người lái có thể kéo ga thấp hơn, nhưng không tăng vượt trần hạ cánh.
+  - Khi trần ga xuống vùng idle, firmware chờ 3 giây rồi tự DISARM.
+  - Khi điện áp <= 10.5 V hoặc cảm biến pin không đọc được, firmware không cho ARM.
+
+  Cảm biến áp       : Module đo DC 0–25V, chia áp danh định 5:1
+  GPIO ADC          : GPIO35 / ADC1_CH7 / input-only
+  Hệ số code        : heSoPin = 5.0 mặc định, lưu bằng NVS key "hSPin"
+  Cách đọc          : lấy trung bình 32 mẫu analogReadMilliVolts(GPIO35)
+  Lọc điện áp        : dienApPin = old*0.85 + new*0.15
+  Công thức code    : Vbat = ADC_mV / 1000 * heSoPin
+
+  Cảnh báo 4S:
+  - Module 5:1 với 4S đầy 16.8V cho ra khoảng 3.36V.
+  - GPIO ESP32 không chịu 5V và ADC thực tế không nên bị kéo quá 3.3V.
+  - Muốn dùng 4S phải đổi tỉ lệ chia áp, đo lại bằng đồng hồ và chỉnh heSoPin.
+
+================================================================================
+  8) IMU MPU6500 / GY-6500
+================================================================================
+  Chip              : MPU6500 6DOF
+  Module trong ảnh  : GY-6500 / MPU6500 IMU 6DOF
+  Loại cảm biến     : 3-axis accelerometer + 3-axis gyroscope
+  Độ phân giải      : 16-bit
+  Nguồn module ảnh  : 3.3V–5VDC
+  Logic I2C ảnh     : 3.3VDC, module có sẵn pull-up I2C lên 3.3V
+  Header ảnh        : chuẩn 2.54 mm
+  Kích thước ảnh    : khoảng 15 x 25 mm
+  I2C address       : 0x68 khi AD0=GND
+  WHO_AM_I expected : 0x70
+  Bus I2C           : SDA GPIO21, SCL GPIO22, 400 kHz
+  Driver            : mpu6500_driver.cpp / mpu6500_driver.h
+
+  Cấu hình thanh ghi theo driver:
+  - Reset chip                 : PWR_MGMT_1 = 0x80, delay 100 ms
+  - Clock PLL gyro             : PWR_MGMT_1 = 0x01
+  - Sample rate                : SMPLRT_DIV = 0x03 -> 1000/(1+3)=250 Hz
+  - Gyro DLPF                  : CONFIG = 0x04, xấp xỉ 20 Hz
+  - Gyro full-scale            : GYRO_CONFIG = 0x08 -> ±500 deg/s
+  - Gyro scale                 : 65.5 LSB/(deg/s)
+  - Accel full-scale           : ACCEL_CONFIG = 0x08 -> ±4 g
+  - Accel scale                : 8192 LSB/g
+  - Accel DLPF                 : ACCEL_CONFIG2 = 0x04, xấp xỉ 20 Hz
+  - Burst read                 : 14 byte từ ACCEL_XOUT_H
+
+  Hiệu chuẩn:
+  - CALIB_SAMPLES              : 500 mẫu
+  - Khi khởi động, firmware tự gọi mpu.calibrate()
+  - Driver hiện chỉ tính gyro bias; accel offset trong driver được reset về 0.
+  - Cân bằng level dùng rollOffset/pitchOffset lưu qua web/NVS.
+
+  Bộ lọc trong driver:
+  - Accel LPF trước atan2       : alpha = 0.05
+  - Complementary filter        : alpha = 0.98 gyro + 0.02 accel
+  - Yaw                         : tích phân gyro Z, giữ trong [-180, +180]
+
+  Orientation đang dùng trong firmware:
+  IMU_SWAP_ROLL_PITCH          : 1
+  IMU_ROLL_SIGN                : -1.0
+  IMU_PITCH_SIGN               : +1.0
+  IMU_YAW_SIGN                 : +1.0
+  IMU_RATE_ROLL_SIGN           : -1.0
+  IMU_RATE_PITCH_SIGN          : +1.0
+  IMU_RATE_YAW_SIGN            : +1.0
+
+  Diễn giải:
+  - Firmware đang hoán đổi roll/pitch từ driver để khớp cách gắn IMU thực tế.
+  - Roll angle dùng d.angle.pitch rồi nhân -1.
+  - Pitch angle dùng d.angle.roll rồi nhân +1.
+  - Roll rate dùng d.gy rồi nhân -1.
+  - Pitch rate dùng d.gx rồi nhân +1.
+  - Nếu đổi chiều gắn FC/MPU, phải sửa nhóm IMU_* trước khi tune PID.
+
+================================================================================
+  9) GPS / COMPASS / ALTITUDE TELEMETRY
+================================================================================
+  BMP280             : ĐÃ XÓA khỏi firmware và web UI.
+  Độ cao chính trên web: altNewM từ cảm biến độ cao mới, không còn dùng barometer.
+
+  A) GPS/COMPASS BZGNSS BZ-251GPS
+  Trạng thái code    : GPS_UART_ENABLED=1, parser NMEA đang bật
+  Tên sản phẩm ảnh   : BZGNSS BZ-251 GPS with 5883 Compass / BZ-251GPS
+  GNSS chip          : M10
+  La bàn             : QMC5883
+  Anten              : anten gốm
+  Nguồn ảnh          : 5V
+  GPS UART           : UART2, 38400, SERIAL_8N1
+  GPS RX/TX ESP32    : GPS TX -> ESP32 GPIO34; GPS RX -> ESP32 GPIO32
+  GPS parser         : NMEA GGA + RMC, checksum nếu có
+  GPS debug web      : gpsOk, gpsFix, gpsState, gpsBytes, gpsLastSentenceMs,
+                       gpsLastType, gpsSat, gpsHdop, lat/lon/alt/speed/course
+  GPS state          : NO UART DATA / DATA NO FIX / FIX OK tùy tín hiệu thực tế
+  Giao thức ảnh      : NMEA / UBLOX
+  Lưu ý              : Nếu gpsBytes tăng nhưng gpsLastType là NON_NMEA hoặc không
+                       có GGA/RMC, khả năng module đang xuất UBLOX binary hoặc sai baud.
+
+  B) QMC5883 COMPASS
+  Bus I2C            : chung SDA GPIO21 / SCL GPIO22 với MPU6500
+  Địa chỉ mặc định   : 0x0D
+  Tần suất đọc       : 100 ms
+  Web/log            : compassOk, headingDeg, magX/magY/magZ, compassState
+  Vai trò hiện tại   : chỉ hiển thị/log, chưa đưa vào yaw control
+  Lỗi khởi tạo       : Nếu không thấy 0x0D, firmware scan I2C và báo compassOk=false.
+
+  C) MTF-01P OPTICAL FLOW / TOF ALT SENSOR
+  Trạng thái code    : Đang bật đồng thời với GPS
+  UART               : UART0 remap, 115200, SERIAL_8N1, invert=false
+  Chân dùng          : MTF TX -> ESP32 GPIO16; MTF RX -> ESP32 GPIO17
+  Function range     : MSP V2 0x1F02
+  Payload range      : payload[0..3] little-endian = distance cm
+  Function flow      : MSP V2 0x1F01, đọc quality nếu có
+  Web status         : ALT SENSOR, altSensorOk, altState, altNewM, altQuality
+  Field JSON         : altSensorOk, altNewM, altState, altQuality, altLastMs,
+                       altBytes, altFrames, altRangeFrames, altBadFrames
+  Tốc độ đầu ra ảnh  : 100 Hz
+  Tầm TOF ảnh        : 12 m @ 90% phản xạ / 600 Lux
+                       8 m @ 90% phản xạ / 60K Lux
+
+  Lưu ý tích hợp ALT:
+  - ESP32 hiện dùng UART0 MTF, UART1 SBUS, UART2 GPS.
+  - USB Serial Monitor/blackbox bị tắt khi MTF dùng UART0; xem telemetry qua web WiFi.
+  - Không dùng GPIO33 cho MTF vì GPIO33 đang xuất PWM ESC M4.
+
+================================================================================
+  10) RC RECEIVER / SBUS
+================================================================================
+  TX                : Microzone MC6C hoặc tay tương thích 6 kênh
+  TX ảnh/PDF        : Microzone 6C-MINI, 6 kênh, 2.4GHz FHSS
+  RX                : MC7RE / MC7RE-V2 hoặc receiver xuất SBUS
+  RX PDF            : MC7RE-V2, 7 PWM signals + 1 SBUS signal
+  UART              : Serial2
+  Baud              : 100000
+  Format            : SERIAL_8E2
+  Inverted          : true
+  RX pin            : GPIO14
+  TX pin            : -1, không dùng
+  Frame size        : 25 byte
+  Start byte        : 0x0F
+  Chu kỳ frame PDF  : 14 ms/frame
+  Mức tín hiệu PDF  : SBUS/PWM high level 3.3V
+  Raw map           : 172–1811 -> 1000–2000 us
+  Timeout failsafe  : 1000 ms không có frame -> matTinHieu = true, SBUS OFF
+  Lost frame flag   : buf[23] bit 2 -> SBUS OFF
+  Failsafe flag     : buf[23] bit 3 -> matTinHieu
+  Mức sóng tay cầm  : chất lượng frame SBUS, không phải RSSI RF thật của receiver
+
+  Thông số Microzone từ ảnh/PDF:
+  - TX tần số                 : 2401–2478 MHz
+  - TX công suất              : <= 100 mW
+  - TX nguồn                  : DC 4.5–9V, dùng 4 pin AA hoặc 2S LiPo
+  - RX nguồn                  : DC 4.5–6V
+  - Khoảng cách điều khiển    : ảnh ghi 300–800 m; PDF ghi >800 m
+  - RX failsafe mặc định      : CH1/CH2/CH4 = 1500 us, CH3 = 900 us,
+                                các kênh khác giữ nguyên
+  - PWM RX                    : 1000–2000 us khi không mix; 880–2120 us khi mix/trim
+
+  Lưu ý SBUS:
+  - Manual MC7RE ghi SBUS cần đảo mức tín hiệu. Firmware ESP32 đang dùng tham số
+    inversion=true trong Serial2.begin(). Nếu thực tế không đọc được SBUS, cần thêm
+    mạch đảo mức hoặc kiểm tra đúng chân/pad SBUS của receiver.
+
+  Channel map theo code:
+  CH1  -> Roll stick
+  CH2  -> Pitch stick
+  CH3  -> Throttle / ga
+  CH4  -> ARM/DISARM gesture
+  CH5  -> AUX1, hiển thị web
+  CH6  -> AUX2, hiển thị web
+
+  ARM/DISARM bằng CH4:
+  - ARM    : CH4 > 1750 giữ > 3 giây
+  - DISARM : CH4 < 1250 giữ > 1 giây
+
+  Điều kiện cho phép ARM:
+  - MPU6500 OK
+  - SBUS OK
+  - Không mất tín hiệu
+  - CH3 throttle <= 1150
+  - |roll| <= 10 deg và |pitch| <= 10 deg
+
+================================================================================
+  11) WIFI / WEB UI
+================================================================================
+  Mode              : WiFi AP
+  SSID              : ESP32_DRONE
+  Password          : 12345678
+  IP AP             : 192.168.4.1
+  Gateway           : 192.168.4.1
+  Subnet            : 255.255.255.0
+  Channel           : 6
+  Max clients       : 2
+  WiFi sleep        : OFF
+  TX power          : WIFI_POWER_17dBm
+  Watchdog AP       : kiểm tra mỗi 2000 ms, restart AP nếu mất IP
+  Web server        : port 80
+
+  Endpoint chính:
+  /                  -> WEB_UI_HTML
+  /status            -> JSON telemetry/config, gồm GPS/compass/alt sensor, không còn BMP
+  /arm               -> arm nếu đủ điều kiện
+  /disarm            -> disarm + motor 1000 us
+  /reset_safe        -> xóa cờ an toàn
+  /pid_toggle        -> bật/tắt PID
+  /set_center        -> lưu tâm stick CH1..CH4, CH4 ép 1500
+  /set_gps_home      -> lưu home marker nếu GPS đang FIX
+  /save_pid          -> lưu Roll/Pitch PID chung + Yaw PID
+  /save_config       -> lưu heSoPin
+  /save_notch        -> lưu notch frequency/bandwidth
+  /save_offset       -> lưu rollOffset/pitchOffset
+
+  Web UI mới:
+  - Bản đồ thế giới offline bằng canvas, không gọi CDN/tile Internet.
+  - La bàn tròn đọc headingDeg từ QMC5883.
+  - Badge ALT SENSOR thay cho BMP280, hiển thị altState/altNewM/altQuality.
+  - Header nhiệt độ chỉ còn MPU và ESP.
+
+================================================================================
+  12) PID / CONTROL DEFAULTS THEO FIRMWARE
+================================================================================
+  CONFIG_VERSION     : 40
+  NVS namespace      : drone_v30
+
+  Rate PID Roll/Pitch dùng chung:
+  DEFAULT_RP_KP      : 1.15
+  DEFAULT_RP_KI      : 0.080
+  DEFAULT_RP_KD      : 0.011
+  Giới hạn web/code  : Kp 0–3, Ki 0–0.08, Kd 0–0.04
+
+  Angle PID Roll/Pitch:
+  DEFAULT_ANGLE_KP   : 6.00
+  Ki/Kd angle        : không dùng, chỉ Kp
+  Giới hạn angle Kp  : 0–8
+
+  Yaw Rate PID:
+  DEFAULT_YAW_KP     : 0.80
+  DEFAULT_YAW_KI     : 0.000
+  DEFAULT_YAW_KD     : 0.000
+  Giới hạn web/code  : Kp 0–8, Ki 0–0.1, Kd 0–0.02
+  Trạng thái thực tế : Yaw PID ĐANG HOẠT ĐỘNG khi batPid=true và được trộn vào motor.
+  Target yaw         : 0 deg/s, giữ tốc độ quay yaw về 0.
+
+  Lưu ý quan trọng:
+  - Header log Serial hiện in đúng hệ số yaw PID đang chạy.
+  - web_ui reset mặc định đã đồng bộ với firmware default.
+  - Offset mặc định theo bộ tune hiện tại: Roll -3.0 deg, Pitch +0.7 deg.
+  - Giá trị thực tế sau khi chạy có thể khác default nếu đã lưu trên NVS qua web.
+
+================================================================================
+  13) FILTERS / NOTCH / LPF
+================================================================================
+  Flight loop sample : 250 Hz
+  Notch default      : DEFAULT_NOTCH_HZ = 80 Hz
+  Notch bandwidth    : DEFAULT_NOTCH_BW = 20 Hz
+  Notch limit        : frequency 20–110 Hz, bandwidth 5–50 Hz
+  Notch applied to   : gx_raw, gy_raw, gz_raw trước Rate PID
+
+  D-term LPF alpha   : DTERM_LPF_ALPHA = 0.85
+  Angle display LPF  : ALPHA_GOC = 0.20
+  Accel LPF driver   : alpha = 0.05
+  Complementary      : 0.98 gyro + 0.02 accel
+
+================================================================================
+  14) BLACKBOX SERIAL LOG
+================================================================================
+  USB Serial baud    : 115200
+  LOG_SAMPLE_HZ      : 5 Hz
+  Chỉ log khi        : ARMED
+  Header in lại      : mỗi lần ARM
+  Nội dung CSV       : seq, time, armed, pid, throttle, CH1–CH4, roll/pitch/yaw,
+                       gyro raw, gyro filtered, target angle/rate, PID output,
+                       motor M1–M4, battery, notch Hz/BW, GPS, compass, alt sensor
+
+  Lưu ý:
+  - Log header trong code ghi đúng pid_yaw Kp/Ki/Kd đang chạy.
+  - GPS/compass/alt sensor chỉ log telemetry/debug, chưa tham gia điều khiển bay.
+  - Dữ liệu log cũ có thể phản ánh PID/NVS cũ, không nhất thiết là default hiện tại.
+
+================================================================================
+  15) TRÌNH TỰ SETUP THEO CODE
+================================================================================
+  1. Tắt brownout detector.
+  2. Serial.begin(115200).
+  3. Tạo mutex.
+  4. Nạp cấu hình NVS và set notch filter.
+  5. Khởi tạo MPU6500 trên I2C 21/22, calibrate gyro 500 mẫu.
+  6. Wire.setTimeOut(20).
+  7. Khởi tạo QMC5883 tại 0x0D, nếu không thấy thì scan I2C và báo FAIL.
+  8. Serial1.begin(100000, SERIAL_8E2, GPIO14, -1, true) cho SBUS.
+  9. GPS UART2 begin 38400 8N1, RX GPIO34, TX GPIO32.
+  10. MTF-01P UART0 begin 115200 8N1, RX GPIO16, TX GPIO17.
+ 11. Đọc điện áp pin lần đầu.
+ 12. Khởi tạo WiFi AP.
+ 13. Khởi tạo web server.
+ 14. Allocate LEDC timers 0..3.
+ 15. Attach 4 ESC 400Hz, 1000–2000us, ghi 1000us.
+ 16. Delay 2000ms cho ESC.
+ 17. Tạo taskFlight trên core 1, taskComm trên core 0.
+ 18. loop() tự xóa.
+
+================================================================================
+  16) CHECKLIST LẮP RÁP TRƯỚC KHI CẤP NGUỒN
+================================================================================
+  [ ] Tháo toàn bộ cánh khi nạp code/test motor.
+  [ ] GND tất cả module nối chung.
+  [ ] SDA/SCL đúng GPIO21/GPIO22, không đảo dây.
+  [ ] MPU6500 AD0 kéo GND để địa chỉ 0x68.
+  [ ] QMC5883 compass dùng I2C 0x0D trên GPIO21/GPIO22.
+  [ ] GPS TX nối ESP32 GPIO34, GPS RX nối ESP32 GPIO32.
+  [ ] GPS GND nối ESP32 GND, GPS VCC cấp 5V hoặc 3V3 theo module.
+  [ ] MTF TX nối ESP32 GPIO16, MTF RX nối ESP32 GPIO17.
+  [ ] Khi GPS + MTF chạy đồng thời, dùng web WiFi để xem log/telemetry vì USB Serial runtime đã tắt.
+  [ ] SBUS receiver ở mode SBUS, không phải PPM/PWM từng kênh.
+  [ ] SBUS signal vào GPIO14, receiver GND chung với ESP32.
+  [ ] Điện áp vào GPIO35 qua chia áp, KHÔNG đưa pin trực tiếp vào GPIO.
+  [ ] ESC signal đúng M1=27, M2=26, M3=25, M4=33.
+  [ ] Chỉ một nguồn 5V/BEC cấp vào rail 5V nếu ESC có BEC.
+  [ ] Prop theo đúng chiều: M1/M3 CCW, M2/M4 CW.
+  [ ] Trước khi ARM: máy đặt phẳng, throttle thấp, SBUS OK, MPU OK.
+
+================================================================================
+  17) CÁC ĐIỂM ĐÃ SỬA SO VỚI FILE CŨ
+================================================================================
+  1. Sửa hướng quay motor:
+     - File cũ ghi M1 CW, M2 CCW, M3 CW, M4 CCW.
+     - Code hiện tại ghi M1 CCW, M2 CW, M3 CCW, M4 CW.
+
+  2. Sửa PID Roll/Pitch default:
+     - Firmware DEFAULT_RP hiện tại là Kp=1.15, Ki=0.080, Kd=0.011.
+
+  3. Sửa trạng thái Yaw PID:
+     - File cũ ghi Yaw PID tắt / không trộn yaw.
+     - Code hiện tại có pidYaw và buYaw được trộn vào tronMotorX().
+
+  4. Sửa Notch bandwidth default:
+     - File/log cũ có nơi ghi 15 Hz.
+     - Firmware default hiện tại là 20 Hz.
+
+  5. Xóa BMP280 khỏi firmware/web:
+     - Không còn bmpOk, bmpAddr, BmpCal, khoiTaoBmp(), tinhDoCaoBmp(), nhiệt BMP.
+     - Web thay badge BMP280 bằng ALT SENSOR.
+
+  6. Bổ sung cảnh báo 4S với module chia áp 5:1:
+     - Cấu hình đo pin và phần trăm pin hiện phù hợp 3S.
+     - 4S cần đổi chia áp/hiệu chuẩn, không cắm thẳng theo cấu hình 3S.
+
+  7. Bổ sung IMU orientation thực tế:
+     - Firmware đang swap roll/pitch và đảo dấu roll/rate roll.
+
+  8. Bổ sung điều kiện ARM, failsafe, safety cutoff đúng theo code.
+
+  9. Sửa UART theo firmware mới:
+     - SBUS RX dùng #define PIN_SBUS_RX 14 và Serial1.begin(..., GPIO14, -1, true).
+     - GPS UART2 dùng RX GPIO34, TX GPIO32, baud 38400.
+
+ 10. Tích hợp GPS/QMC5883 telemetry:
+     - GPS parser bật lại với GPS_UART_ENABLED=1.
+     - QMC5883 I2C 0x0D, hiển thị/log headingDeg.
+
+ 11. Tích hợp MTF-01P:
+     - UART0 remap RX GPIO16, TX GPIO17, MSP V2 function 0x1F02.
+     - MTF chạy đồng thời với GPS; USB Serial Monitor runtime tắt để nhường UART0.
+     - altNewM = distance_cm / 100, altState OK/NO UART DATA/BAD FRAME/TIMEOUT.
+
+ 12. Bổ sung thông tin đọc từ ảnh linh kiện:
+     - F330 frame, ESP32 DevKitC-32, pin 3S 2200mAh 45C XT60, A2212 1000KV,
+       ESC 30A, Microzone MC6C/MC7RE, MPU6500 GY-6500.
+     - MTF-01P được dùng theo protocol MSP V2 đã test.
+
+================================================================================
+  KẾT LUẬN CẤU HÌNH ĐÚNG THEO CODE HIỆN TẠI
+================================================================================
+  ESP32-WROOM-32 + MPU6500(0x68) + QMC5883(0x0D) + GPS UART2 RX GPIO34/TX GPIO32 + MTF UART0 RX GPIO16/TX GPIO17 + SBUS GPIO14
+  ESC PWM 400Hz: M1 GPIO27 TL CCW, M2 GPIO26 BL CW,
+                 M3 GPIO25 BR CCW, M4 GPIO33 TR CW
+  Battery monitor: GPIO35, divider 5:1, 3S LiPo, heSoPin=5.0
+  UART split: UART0 MTF, UART1 SBUS, UART2 GPS; USB Serial runtime disabled
+  WiFi AP: ESP32_DRONE / 12345678 / 192.168.4.1
+  Flight loop: 250Hz, Core1 flight, Core0 web
+================================================================================

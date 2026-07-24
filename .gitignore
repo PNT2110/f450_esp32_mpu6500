@@ -1,0 +1,34 @@
+# Local credentials
+local_config.h
+secrets.h
+
+# Arduino / ESP32 build output
+build/
+*.bin
+*.elf
+*.hex
+*.map
+*.eep
+*.lst
+*.sym
+*.d
+*.o
+*.a
+*.su
+*.tmp
+*.bak
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Editor and OS files
+.vscode/
+.agents/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
